@@ -383,6 +383,73 @@ def load_ae(name: str, device: str | torch.device = "cuda", hf_download: bool = 
         print_load_warning(missing, unexpected)
     return ae
 
+# util.py modifications
+
+def load_minimal_model(
+    device: str | torch.device = "cuda",
+    hf_download: bool = True,
+    verbose: bool = False
+) -> FluxMinimal:
+    """
+    Load the minimal Flux model using weights from flux.1-dev.
+    Handles remapping the weights to the simplified architecture.
+    """
+    print("Init minimal model")
+    name = "flux-dev"  # We'll use flux-dev weights
+    ckpt_path = configs[name].ckpt_path
+
+    # Download weights if needed
+    if (
+        ckpt_path is None 
+        and configs[name].repo_id is not None
+        and configs[name].repo_flow is not None
+        and hf_download
+    ):
+        ckpt_path = hf_hub_download(configs[name].repo_id, configs[name].repo_flow)
+
+    # Create minimal model with same base params
+    with torch.device("meta" if ckpt_path is not None else device):
+        model = FluxMinimal(configs[name].params).to(torch.bfloat16)
+
+    if ckpt_path is not None:
+        print("Loading checkpoint")
+        # Load the full state dict
+        sd = load_sft(ckpt_path, device=str(device))
+
+        # Filter the state dict to only include keys that exist in minimal model
+        minimal_state_dict = {}
+        model_state_dict = model.state_dict()
+        
+        for key in model_state_dict.keys():
+            if key in sd:
+                minimal_state_dict[key] = sd[key]
+            else:
+                print(f"Warning: Could not find weight for {key}")
+
+        # Handle special cases for weights that need remapping
+        # Map single stream blocks weights from the original's double/single blocks
+        original_blocks = []
+        for i in range(configs[name].params.depth):
+            original_blocks.extend([
+                f"double_blocks.{i}.img_attn",
+                f"double_blocks.{i}.img_mlp"
+            ])
+        for i in range(configs[name].params.depth_single_blocks):
+            original_blocks.append(f"single_blocks.{i}")
+        
+        for i, orig_prefix in enumerate(original_blocks):
+            for key in sd.keys():
+                if key.startswith(orig_prefix):
+                    new_key = key.replace(orig_prefix, f"blocks.{i}")
+                    if new_key in model_state_dict:
+                        minimal_state_dict[new_key] = sd[key]
+
+        # Load the filtered/remapped weights
+        missing, unexpected = model.load_state_dict(minimal_state_dict, strict=False)
+        if verbose:
+            print_load_warning(missing, unexpected)
+
+    return model
 
 def optionally_expand_state_dict(model: torch.nn.Module, state_dict: dict) -> dict:
     """

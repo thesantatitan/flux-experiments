@@ -67,6 +67,67 @@ def prepare(t5: HFEmbedder, clip: HFEmbedder, img: Tensor, prompt: str | list[st
     }
 
 
+def sample_minimal(
+    model: FluxMinimal,
+    height: int,
+    width: int,
+    num_steps: int,
+    seed: int | None = None,
+    device: str = "cuda",
+) -> Tensor:
+    """
+    Minimal sampling function - just processes noise through timesteps.
+    """
+    # Generate initial noise
+    x = get_noise(
+        1, height, width,
+        device=device,
+        dtype=torch.bfloat16,
+        seed=seed
+    )
+    
+    # Prepare basic inputs
+    inp = prepare_minimal(x)
+    
+    # Get timestep schedule
+    timesteps = get_schedule(num_steps, inp["img"].shape[1], shift=True)
+    
+    # Process through timesteps
+    x = inp["img"]
+    for t_curr, t_next in zip(timesteps[:-1], timesteps[1:]):
+        t_vec = torch.full((x.shape[0],), t_curr, dtype=x.dtype, device=x.device)
+        
+        # Forward pass with just noise and timestep
+        pred = model(
+            img=x,
+            img_ids=inp["img_ids"],
+            timesteps=t_vec,
+        )
+        
+        # Update
+        x = x + (t_next - t_curr) * pred
+    
+    return unpack(x.float(), height, width)
+
+def prepare_minimal(img: Tensor) -> dict[str, Tensor]:
+    """
+    Prepare model inputs without any conditioning - just processes raw noise.
+    """
+    bs, c, h, w = img.shape
+    img = rearrange(img, "b c (h ph) (w pw) -> b (h w) (c ph pw)", ph=2, pw=2)
+
+    # Create positional IDs for the image grid 
+    img_ids = torch.zeros(h // 2, w // 2, 3)
+    img_ids[..., 1] = img_ids[..., 1] + torch.arange(h // 2)[:, None]
+    img_ids[..., 2] = img_ids[..., 2] + torch.arange(w // 2)[None, :]
+    img_ids = repeat(img_ids, "h w c -> b (h w) c", b=bs)
+
+    return {
+        "img": img,
+        "img_ids": img_ids.to(img.device),
+        "timesteps": None  # Will be set during sampling
+    }
+
 def prepare_control(
     t5: HFEmbedder,
     clip: HFEmbedder,

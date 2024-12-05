@@ -141,3 +141,63 @@ class FluxLoraWrapper(Flux):
         for module in self.modules():
             if isinstance(module, LinearLora):
                 module.set_scale(scale=scale)
+
+class FluxMinimal(nn.Module):
+    """
+    Minimal Flux model without text or vector conditioning.
+    Only processes image noise with timestep embeddings.
+    """
+    def __init__(self, params: FluxParams):
+        super().__init__()
+        self.params = params
+        self.hidden_size = params.hidden_size
+        self.num_heads = params.num_heads
+        
+        self.pe_embedder = EmbedND(
+            dim=params.hidden_size // params.num_heads,
+            theta=params.theta, 
+            axes_dim=params.axes_dim
+        )
+        
+        # Only keep image and time processing
+        self.img_in = nn.Linear(self.params.in_channels, self.hidden_size, bias=True)
+        self.time_in = MLPEmbedder(in_dim=256, hidden_dim=self.hidden_size)
+
+        # Single stream of transformer blocks
+        self.blocks = nn.ModuleList([
+            SingleStreamBlock(
+                self.hidden_size,
+                self.num_heads,
+                mlp_ratio=params.mlp_ratio
+            ) for _ in range(params.depth + params.depth_single_blocks)
+        ])
+
+        self.final_layer = LastLayer(self.hidden_size, 1, self.params.out_channels)
+
+    def forward(
+        self,
+        img: Tensor,
+        img_ids: Tensor,
+        timesteps: Tensor,
+    ) -> Tensor:
+        """
+        Forward pass with minimal inputs:
+        - img: Input noise tensor
+        - img_ids: Position IDs for the image grid
+        - timesteps: Current timestep in the diffusion process
+        """
+        # Process image input
+        x = self.img_in(img)
+        
+        # Only time embedding remains
+        time_embed = self.time_in(timestep_embedding(timesteps, 256))
+        
+        # Generate positional embeddings
+        pe = self.pe_embedder(img_ids)
+
+        # Process through transformer blocks
+        for block in self.blocks:
+            x = block(x, vec=time_embed, pe=pe)
+
+        x = self.final_layer(x, time_embed)
+        return x

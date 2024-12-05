@@ -7,7 +7,7 @@ from einops import rearrange, repeat
 from PIL import Image
 from torch import Tensor
 
-from .model import Flux
+from .model import Flux, FluxMinimal
 from .modules.autoencoder import AutoEncoder
 from .modules.conditioner import HFEmbedder
 from .modules.image_embedders import CannyImageEncoder, DepthImageEncoder, ReduxImageEncoder
